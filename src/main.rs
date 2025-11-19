@@ -52,6 +52,19 @@ fn main() -> Result<()> {
     let in_points = build_fine_points();
     let template_cache = build_template_cache(&in_points, &mask_cfg);
 
+    let mut results = Vec::new();
+    let mut total_windows = 0usize;
+    for request in &requests {
+        let (count, best) = process_request(request, &mask_cfg, &template_cache)?;
+        total_windows += count;
+        results.push(SortedEntry {
+            source_chunk: request.source_chunk_string(),
+            chunk_count: request.chunk_count,
+            mask: best,
+        });
+    }
+    results.sort_by(|a, b| b.mask.block_size.cmp(&a.mask.block_size));
+
     let mut writer = csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(&cli.output)
@@ -64,10 +77,16 @@ fn main() -> Result<()> {
         "blockSize",
         "chunkSize",
     ])?;
-
-    let mut total_windows = 0usize;
-    for request in &requests {
-        total_windows += process_request(request, &mask_cfg, &template_cache, &mut writer)?;
+    for entry in &results {
+        let mask = &entry.mask;
+        writer.write_record([
+            entry.source_chunk.clone(),
+            format_chunk_count(entry.chunk_count),
+            mask.block_string(),
+            mask.chunk_string(),
+            mask.block_ratio(),
+            mask.chunk_ratio(),
+        ])?;
     }
     writer.flush()?;
     println!(
@@ -131,8 +150,7 @@ fn process_request(
     request: &ChunkRequest,
     mask_cfg: &MaskConfig,
     templates: &HashMap<Point, MaskTemplate>,
-    writer: &mut csv::Writer<std::fs::File>,
-) -> Result<usize> {
+) -> Result<(usize, MaskData)> {
     let half = SCAN_BLOCK_SIZE / 2;
     let center_block_x = request.chunk_x * BLOCKS_PER_CHUNK + BLOCKS_PER_CHUNK / 2;
     let center_block_z = request.chunk_z * BLOCKS_PER_CHUNK + BLOCKS_PER_CHUNK / 2;
@@ -165,15 +183,7 @@ fn process_request(
         }
     }
     let best = best.ok_or_else(|| anyhow!("no results produced for chunk"))?;
-    writer.write_record([
-        request.source_chunk_string(),
-        request.chunk_count_string(),
-        best.block_string(),
-        best.chunk_string(),
-        best.block_ratio(),
-        best.chunk_ratio(),
-    ])?;
-    Ok(count)
+    Ok((count, best))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -196,12 +206,16 @@ impl ChunkRequest {
     fn source_chunk_string(&self) -> String {
         format!("{},{}", self.chunk_x, self.chunk_z)
     }
+}
 
-    fn chunk_count_string(&self) -> String {
-        self.chunk_count
-            .map(|v| v.to_string())
-            .unwrap_or_else(String::new)
-    }
+struct SortedEntry {
+    source_chunk: String,
+    chunk_count: Option<i32>,
+    mask: MaskData,
+}
+
+fn format_chunk_count(value: Option<i32>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(String::new)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
